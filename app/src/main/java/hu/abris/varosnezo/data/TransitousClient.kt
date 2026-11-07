@@ -53,7 +53,11 @@ class TransitousClient(private val baseUrl: String = BuildConfig.ROUTING_URL) {
             val key = norm(text.substringBefore(","))
             val all = query(null) + (if (near != null) query(near) else emptyList())
             all.distinctBy { it.name.lowercase(Locale.ROOT) + "|" + it.area }
-                .sortedByDescending { norm(it.name) == key || norm(it.name) == norm(text) } // stabil: az API sorrendje marad
+                .sortedWith(
+                    // pontos névegyezés előre, azon belül a közeli (50 km) – egyébként az API sorrendje marad
+                    compareByDescending<PlaceHit> { norm(it.name) == key || norm(it.name) == norm(text) }
+                        .thenByDescending { near != null && Geo.dist(it.pos, near) < 50_000 }
+                )
                 .take(6)
         }
 
