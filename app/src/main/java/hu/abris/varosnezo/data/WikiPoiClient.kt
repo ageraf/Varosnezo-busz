@@ -23,8 +23,16 @@ class WikiPoiClient(private val lang: String) {
     /** Ennél kevesebb havi olvasás alatt kimarad (a magyar Wikipedia kisebb, ezért ott alacsonyabb). */
     private val minViews = if (lang == "en") 300 else 30
 
+    // Nem látnivaló: állomások, hálózatok, közigazgatási egységek, események
     private val skip = Regex(
-        "metróállomás|megállóhely|vasútállomás|villamosmegálló|metro station|railway station|tram stop|bus station"
+        "metróállomás|megállóhely|vasútállomás|villamosmegálló|pályaudvar|metro station|railway station|" +
+            "tram stop|bus station|hálózata|network|kerülete|district|ostroma|siege of|királyság|kingdom of|" +
+            "autóbuszvonal|villamosvonal|bus route|tram line|metro line|metróvonal"
+    )
+
+    /** Koordináta-típusok, amelyek nem egy konkrét látnivalót jelölnek. */
+    private val skipTypes = setOf(
+        "city", "country", "state", "adm1st", "adm2nd", "adm3rd", "isle", "railwaystation", "airport", "edu",
     )
 
     private fun api(w: String) = "https://$w.wikipedia.org/w/api.php?format=json&formatversion=2"
@@ -64,12 +72,18 @@ class WikiPoiClient(private val lang: String) {
     private fun geosearch(p: LatLng, radiusM: Int, into: MutableMap<String, Cand>) {
         for (w in wikis()) {
             val url = api(w) + "&action=query&list=geosearch&gslimit=30&gsradius=$radiusM" +
-                "&gscoord=${p.lat}${Http.enc("|")}${p.lng}"
+                "&gsprop=${Http.enc("type|dim")}&gscoord=${p.lat}${Http.enc("|")}${p.lng}"
             val arr = JSONObject(Http.get(url)).optJSONObject("query")?.optJSONArray("geosearch") ?: continue
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
+            val rows = (0 until arr.length()).map { arr.getJSONObject(it) }
+            // Ha 3+ cikk pontosan ugyanazon a ponton áll, az a város „jelképes” koordinátája
+            // (pl. Budapest, metróhálózat, buszhálózat) – ezek nem látnivalók.
+            val crowded = rows.groupingBy { "%.5f,%.5f".format(java.util.Locale.ROOT, it.getDouble("lat"), it.getDouble("lon")) }
+                .eachCount().filterValues { it >= 3 }.keys
+            for (o in rows) {
                 val title = o.getString("title")
                 if (skip.containsMatchIn(title.lowercase())) continue
+                if (o.optString("type") in skipTypes) continue
+                if ("%.5f,%.5f".format(java.util.Locale.ROOT, o.getDouble("lat"), o.getDouble("lon")) in crowded) continue
                 val id = o.getLong("pageid")
                 into.putIfAbsent("$w:$id", Cand(w, id, title, LatLng(o.getDouble("lat"), o.getDouble("lon"))))
             }
