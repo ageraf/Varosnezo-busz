@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import hu.abris.varosnezo.LatLng
@@ -70,7 +71,7 @@ fun TourMap(
         }
     }
 
-    AndroidView(factory = { map }, modifier = modifier, update = { m ->
+    AndroidView(factory = { map }, modifier = modifier.clipToBounds(), update = { m ->
         m.overlays.clear()
         if (path != null && path.size >= 2) {
             m.overlays.add(Polyline(m).apply {

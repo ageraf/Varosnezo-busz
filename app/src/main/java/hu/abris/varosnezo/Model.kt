@@ -9,6 +9,7 @@ data class Poi(
     val text: String,
     val pos: LatLng,
     val routeMeters: Double,
+    val views: Int = 0, // a cikk olvasottsága az elmúlt 30 napban
 )
 
 data class TransitStep(val line: String, val from: String, val to: String, val stops: Int)
