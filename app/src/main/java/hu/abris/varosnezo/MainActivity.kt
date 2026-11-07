@@ -40,8 +40,10 @@ private fun App() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var from by rememberSaveable { mutableStateOf("") }
-    var to by rememberSaveable { mutableStateOf("") }
+    var city by rememberSaveable { mutableStateOf("") }
+    var line by rememberSaveable { mutableStateOf("") }
+    var board by rememberSaveable { mutableStateOf("") }
+    var alight by rememberSaveable { mutableStateOf("") }
     var voice by rememberSaveable { mutableStateOf(TourState.lang) } // felolvasás nyelve
     var source by rememberSaveable { mutableStateOf("en") }         // Wikipedia nyelve
     var loading by remember { mutableStateOf(false) }
@@ -81,8 +83,8 @@ private fun App() {
         try {
             TourState.lang = voice
             TourState.pois.value = emptyList()
-            status = "Útvonal tervezése…"
-            val p = TransitousClient().transitRoute(from, to, voice)
+            status = "Járat keresése…"
+            val p = TransitousClient().lineRoute(city, line, board, alight, voice)
             TourState.plan.value = p
             status = "Látnivalók keresése…"
             var list = WikiPoiClient(source).poisAlong(p)
@@ -106,15 +108,17 @@ private fun App() {
         ) {
             item { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Városnéző Busz", style = MaterialTheme.typography.headlineSmall)
-                OutlinedTextField(from, { from = it }, Modifier.fillMaxWidth(), label = { Text("Honnan (A)") }, singleLine = true)
-                OutlinedTextField(to, { to = it }, Modifier.fillMaxWidth(), label = { Text("Hová (B)") }, singleLine = true)
+                OutlinedTextField(city, { city = it }, Modifier.fillMaxWidth(), label = { Text("Város") }, placeholder = { Text("Róma") }, singleLine = true)
+                OutlinedTextField(line, { line = it }, Modifier.fillMaxWidth(), label = { Text("Járat") }, placeholder = { Text("40, 2-es villamos") }, singleLine = true)
+                OutlinedTextField(board, { board = it }, Modifier.fillMaxWidth(), label = { Text("Felszállás (megálló)") }, singleLine = true)
+                OutlinedTextField(alight, { alight = it }, Modifier.fillMaxWidth(), label = { Text("Leszállás (megálló)") }, singleLine = true)
                 LangRow("Látnivalók", source) { source = it }
                 LangRow("Felolvasás", voice) { voice = it }
                 Button(
                     onClick = { planRoute() },
-                    enabled = !loading && !running && from.isNotBlank() && to.isNotBlank(),
+                    enabled = !loading && !running && listOf(city, line, board, alight).all { it.isNotBlank() },
                     modifier = Modifier.fillMaxWidth(),
-                ) { Text("Útvonal és látnivalók") }
+                ) { Text("Járat és látnivalók") }
                 if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
                 (status ?: message)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             } }

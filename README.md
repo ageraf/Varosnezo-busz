@@ -1,12 +1,13 @@
 # Városnéző Busz – MVP (1. funkció), ingyenes változat
 
-A→B címet megadva tömegközlekedési útvonalat tervez (busz/villamos), a járműves szakasz
-mentén Wikipedia-látnivalókat keres, és utazás közben sorban felolvassa őket.
+Város + járat + felszállási és leszállási megálló alapján megkeresi a járat tényleges
+útvonalát, mellette Wikipedia-látnivalókat keres, és utazás közben sorban felolvassa őket.
+Ha a leszállási megálló nem található, kiírja a járat következő megállóit.
 Nincs API-kulcs, nincs fizetős szolgáltatás.
 
 | Rész | Forrás |
 |---|---|
-| Címkeresés + útvonal | MOTIS API – alapból a Transitous közösségi szervere |
+| Megálló, indulások, járat útvonala | MOTIS API – alapból a Transitous közösségi szervere |
 | Látnivalók | Wikipedia API |
 | Felolvasás | a telefon beépített TTS-e |
 

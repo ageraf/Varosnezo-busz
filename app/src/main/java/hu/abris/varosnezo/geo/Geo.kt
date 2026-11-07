@@ -75,23 +75,45 @@ object Geo {
 
     data class Projection(val segIndex: Int, val alongM: Double, val offM: Double)
 
+    private fun projectSeg(p: LatLng, path: List<LatLng>, cum: DoubleArray, i: Int): Projection {
+        val k = cos(Math.toRadians(p.lat)) * M_PER_DEG
+        val a = path[i]
+        val b = path[i + 1]
+        val bx = (b.lng - a.lng) * k
+        val by = (b.lat - a.lat) * M_PER_DEG
+        val px = (p.lng - a.lng) * k
+        val py = (p.lat - a.lat) * M_PER_DEG
+        val len2 = bx * bx + by * by
+        val t = if (len2 > 0) ((px * bx + py * by) / len2).coerceIn(0.0, 1.0) else 0.0
+        return Projection(i, cum[i] + t * (cum[i + 1] - cum[i]), hypot(px - t * bx, py - t * by))
+    }
+
     /** Pont vetítése az útvonalra: hol tart rajta (alongM) és milyen messze van tőle (offM). */
     fun project(p: LatLng, path: List<LatLng>, cum: DoubleArray, fromSeg: Int = 0): Projection {
         var best = Projection(0, 0.0, Double.MAX_VALUE)
-        val k = cos(Math.toRadians(p.lat)) * M_PER_DEG
         val start = fromSeg.coerceIn(0, max(0, path.size - 2))
         for (i in start until path.size - 1) {
-            val a = path[i]
-            val b = path[i + 1]
-            val bx = (b.lng - a.lng) * k
-            val by = (b.lat - a.lat) * M_PER_DEG
-            val px = (p.lng - a.lng) * k
-            val py = (p.lat - a.lat) * M_PER_DEG
-            val len2 = bx * bx + by * by
-            val t = if (len2 > 0) ((px * bx + py * by) / len2).coerceIn(0.0, 1.0) else 0.0
-            val off = hypot(px - t * bx, py - t * by)
-            if (off < best.offM) best = Projection(i, cum[i] + t * (cum[i + 1] - cum[i]), off)
+            val pr = projectSeg(p, path, cum, i)
+            if (pr.offM < best.offM) best = pr
         }
         return best
+    }
+
+    /** Az első olyan szakasz fromSeg után, ami tolM-en belül van (körjáratnál nem ugrik a végére). */
+    fun projectFirst(p: LatLng, path: List<LatLng>, cum: DoubleArray, fromSeg: Int, tolM: Double = 40.0): Projection {
+        val start = fromSeg.coerceIn(0, max(0, path.size - 2))
+        for (i in start until path.size - 1) {
+            val pr = projectSeg(p, path, cum, i)
+            if (pr.offM <= tolM) return pr
+        }
+        return project(p, path, cum, fromSeg)
+    }
+
+    /** Az útvonal d0..d1 méter közötti része. */
+    fun slice(path: List<LatLng>, cum: DoubleArray, d0: Double, d1: Double): List<LatLng> {
+        val out = mutableListOf(pointAt(path, cum, d0))
+        for (i in path.indices) if (cum[i] > d0 && cum[i] < d1) out += path[i]
+        out += pointAt(path, cum, d1)
+        return out
     }
 }
