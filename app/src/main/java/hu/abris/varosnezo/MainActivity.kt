@@ -11,6 +11,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -22,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -36,6 +39,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.Locale
 import kotlin.coroutines.resume
+
+/** Egy helymező állapota: beírt szöveg, találatok, kiválasztott találat. */
+private class PlaceState {
+    var text by mutableStateOf("")
+    var hits by mutableStateOf<List<TransitousClient.PlaceHit>>(emptyList())
+    var picked by mutableStateOf<TransitousClient.PlaceHit?>(null)
+    var open by mutableStateOf(false)
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,7 +63,7 @@ private fun App() {
     val client = remember { TransitousClient() }
 
     var tab by rememberSaveable { mutableIntStateOf(0) }
-    var city by rememberSaveable { mutableStateOf("") }
+    val city = remember { PlaceState() }
     var line by rememberSaveable { mutableStateOf("") }
     var lang by rememberSaveable { mutableStateOf(TourState.lang) }
 
@@ -63,8 +74,8 @@ private fun App() {
 
     var loading by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    var walkTo by rememberSaveable { mutableStateOf("") }
-    var walkFrom by rememberSaveable { mutableStateOf("") }
+    val walkTo = remember { PlaceState() }
+    val walkFrom = remember { PlaceState() }
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var expanded by remember { mutableStateOf(setOf<Long>()) }
 
@@ -130,15 +141,14 @@ private fun App() {
                 TourState.pois.value = emptyList()
                 status = "Helyzet meghatározása…"
                 val here = currentLocation(ctx)
-                val start = if (walkFrom.isBlank()) {
+                val start = if (walkFrom.text.isBlank()) {
                     here ?: error("Nem sikerült meghatározni a helyzetedet.")
                 } else {
-                    val near = here ?: client.geocodeNear(walkTo, LatLng(47.4979, 19.0402), lang)?.second
-                        ?: error("Nem található: $walkTo")
-                    client.geocodeNear(walkFrom, near, lang)?.second ?: error("Nem található: $walkFrom")
+                    resolve(walkFrom, here).pos
                 }
+                val dest = resolve(walkTo, start)
                 status = "Gyalogos útvonal tervezése…"
-                val p = client.walkRoute(start, walkTo, lang)
+                val p = client.walkRoute(start, dest, lang)
                 TourState.plan.value = p
                 status = "Látnivalók keresése…"
                 TourState.pois.value = WikiPoiClient(lang).poisAlong(p, corridorM = 120.0, minGapM = 100.0)
@@ -151,12 +161,35 @@ private fun App() {
         }
     }
 
+    fun searchPlace(st: PlaceState) = scope.launch {
+        if (st.text.isBlank()) return@launch
+        loading = true
+        try {
+            status = null
+            st.hits = client.searchPlaces(st.text, me, lang)
+            if (st.hits.isEmpty()) status = "Nincs találat: ${st.text}"
+            if (st.hits.size == 1) st.picked = st.hits.first() else st.open = st.hits.isNotEmpty()
+        } catch (e: Exception) {
+            status = "Hiba: ${e.message}"
+        } finally {
+            loading = false
+        }
+    }
+
+    /** A kiválasztott találat, vagy ha nincs, a legjobb találat (és ki is írjuk, mit választottunk). */
+    suspend fun resolve(st: PlaceState, near: LatLng?): TransitousClient.PlaceHit {
+        st.picked?.let { return it }
+        val hit = client.searchPlaces(st.text, near, lang).firstOrNull() ?: error("Nem található: ${st.text}")
+        st.picked = hit
+        return hit
+    }
+
     fun loadDirections() = scope.launch {
         loading = true
         try {
             status = "Járat keresése…"
             dirs = emptyList()
-            dirs = client.directions(city, line, lang)
+            dirs = client.directions(resolve(city, me), line, lang)
             selectDirection(0)
             status = null
         } catch (e: Exception) {
@@ -201,17 +234,14 @@ private fun App() {
                 ) {
                     item {
                         Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(
-                                city, { city = it; dirs = emptyList() }, Modifier.fillMaxWidth(),
-                                label = { Text("Város") }, placeholder = { Text("Róma") }, singleLine = true,
-                            )
+                            PlaceField("Város", "Róma", city, onEdit = { dirs = emptyList() }) { searchPlace(city) }
                             OutlinedTextField(
                                 line, { line = it; dirs = emptyList() }, Modifier.fillMaxWidth(),
                                 label = { Text("Járat") }, placeholder = { Text("105, 2-es villamos") }, singleLine = true,
                             )
                             Button(
                                 onClick = { loadDirections() },
-                                enabled = !loading && !running && city.isNotBlank() && line.isNotBlank(),
+                                enabled = !loading && !running && city.text.isNotBlank() && line.isNotBlank(),
                                 modifier = Modifier.fillMaxWidth(),
                             ) { Text("Járat betöltése") }
 
@@ -280,17 +310,11 @@ private fun App() {
                             LangRow(lang) { lang = it; clearPlan() }
 
                             Text("Úti céllal", style = MaterialTheme.typography.titleMedium)
-                            OutlinedTextField(
-                                walkTo, { walkTo = it }, Modifier.fillMaxWidth(),
-                                label = { Text("Hová") }, placeholder = { Text("Pantheon") }, singleLine = true,
-                            )
-                            OutlinedTextField(
-                                walkFrom, { walkFrom = it }, Modifier.fillMaxWidth(),
-                                label = { Text("Honnan") }, placeholder = { Text("üresen: ahol most vagy") }, singleLine = true,
-                            )
+                            PlaceField("Hová", "Pantheon", walkTo) { searchPlace(walkTo) }
+                            PlaceField("Honnan", "üresen: ahol most vagy", walkFrom) { searchPlace(walkFrom) }
                             Button(
                                 onClick = { planWalk() },
-                                enabled = !loading && !running && walkTo.isNotBlank(),
+                                enabled = !loading && !running && walkTo.text.isNotBlank(),
                                 modifier = Modifier.fillMaxWidth(),
                             ) { Text("Gyalogos útvonal és látnivalók") }
                             if (mode == TourState.WALK_ROUTE) plan?.let { p ->
@@ -399,6 +423,53 @@ private fun LazyListScope.poiItems(
                     maxLines = 2, overflow = TextOverflow.Ellipsis,
                 )
             }
+        }
+    }
+}
+
+/** Helymező: beírás, „Keres” gomb, találatok legördülő listában (megye/járás), a választás kiírva. */
+@Composable
+private fun PlaceField(
+    label: String,
+    placeholder: String,
+    st: PlaceState,
+    onEdit: () -> Unit = {},
+    onSearch: () -> Unit,
+) {
+    Column {
+        Box {
+            OutlinedTextField(
+                value = st.text,
+                onValueChange = {
+                    st.text = it
+                    st.picked = null
+                    st.hits = emptyList()
+                    onEdit()
+                },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text(label) },
+                placeholder = { Text(placeholder) },
+                singleLine = true,
+                trailingIcon = { TextButton(onClick = onSearch, enabled = st.text.isNotBlank()) { Text("Keres") } },
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onSearch() }),
+            )
+            DropdownMenu(expanded = st.open, onDismissRequest = { st.open = false }) {
+                st.hits.forEach { h ->
+                    DropdownMenuItem(
+                        text = { Text(h.label) },
+                        onClick = {
+                            st.picked = h
+                            st.text = h.name
+                            st.open = false
+                            onEdit()
+                        },
+                    )
+                }
+            }
+        }
+        st.picked?.let {
+            Text("✓ ${it.label}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
         }
     }
 }

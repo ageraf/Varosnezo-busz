@@ -12,6 +12,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.InputStreamReader
+import java.text.Normalizer
 import java.util.Locale
 
 /**
@@ -22,22 +23,56 @@ class TransitousClient(private val baseUrl: String = BuildConfig.ROUTING_URL) {
 
     data class StopRef(val name: String, val pos: LatLng)
 
+    /** Helykeresési találat: név, terület (megye, járás / régió), koordináta. */
+    data class PlaceHit(val name: String, val area: String, val pos: LatLng, val type: String) {
+        val label: String get() = if (area.isBlank()) name else "$name · $area"
+    }
+
+    /**
+     * Helykeresés. Előbb hely nélkül (a legjobb névegyezés), aztán a megadott pont körül
+     * (közeli utcák, megállók). A pontos névegyezések kerülnek előre; a felhasználó választ.
+     */
+    suspend fun searchPlaces(text: String, near: LatLng?, lang: String): List<PlaceHit> =
+        withContext(Dispatchers.IO) {
+            fun query(bias: LatLng?): List<PlaceHit> {
+                var url = "$baseUrl/api/v1/geocode?text=${Http.enc(text)}&language=$lang"
+                if (bias != null) url += "&place=${Http.enc("${bias.lat},${bias.lng}")}&placeBias=2"
+                val arr = JSONArray(Http.get(url))
+                return (0 until arr.length()).map { arr.getJSONObject(it) }.map { m ->
+                    val areas = m.optJSONArray("areas")
+                    val names = if (areas == null) emptyList()
+                    else (0 until areas.length()).map { areas.getJSONObject(it).optString("name") }
+                    PlaceHit(
+                        m.optString("name"),
+                        names.drop(1).filter { it.isNotBlank() && it != m.optString("name") }.distinct().take(2).joinToString(", "),
+                        LatLng(m.getDouble("lat"), m.getDouble("lon")),
+                        m.optString("type"),
+                    )
+                }
+            }
+            val key = norm(text.substringBefore(","))
+            val all = query(null) + (if (near != null) query(near) else emptyList())
+            all.distinctBy { it.name.lowercase(Locale.ROOT) + "|" + it.area }
+                .sortedByDescending { norm(it.name) == key || norm(it.name) == norm(text) } // stabil: az API sorrendje marad
+                .take(6)
+        }
+
     /** Egy irány: megállók sorrendben, segs[k] = útvonal a k. és k+1. megálló között. */
     data class Direction(val line: String, val stops: List<StopRef>, val segs: List<List<LatLng>>) {
         val label: String get() = "${stops.first().name} → ${stops.last().name} (${stops.size} megálló)"
     }
 
-    suspend fun directions(city: String, line: String, lang: String): List<Direction> =
+    suspend fun directions(city: PlaceHit, line: String, lang: String): List<Direction> =
         withContext(Dispatchers.IO) {
             val key = normLine(line) ?: error("Adj meg járatszámot, pl. 40 vagy 2-es villamos.")
-            val c = geocodeCity(city, lang)
+            val c = city.pos
             // Előbb kis területen keresünk (gyors), ha nincs benne a járat, nagyobbon
             var idxs = emptyList<Int>()
             for (d in listOf(0.01, 0.03, 0.08)) {
                 idxs = routeIndexes(c, d, key)
                 if (idxs.isNotEmpty()) break
             }
-            if (idxs.isEmpty()) error("Nem található a(z) $key járat itt: $city")
+            if (idxs.isEmpty()) error("Nem található a(z) $key járat itt: ${city.name}")
             val dirs = idxs.take(12)
                 .mapNotNull { runCatching { routeDetails(it, key, lang) }.getOrNull() }
                 .filter { it.stops.size >= 2 }
@@ -58,17 +93,18 @@ class TransitousClient(private val baseUrl: String = BuildConfig.ROUTING_URL) {
     }
 
     /** Gyalogos útvonal: from -> szövegesen megadott cél (a cél keresése from körül). */
-    suspend fun walkRoute(from: LatLng, to: String, lang: String): RoutePlan = withContext(Dispatchers.IO) {
-        val dest = geocodeNear(to, from, lang) ?: error("Nem található: $to")
+    suspend fun walkRoute(from: LatLng, dest: PlaceHit, lang: String): RoutePlan = withContext(Dispatchers.IO) {
+        val crow = Geo.dist(from, dest.pos) / 1000
+        if (crow > 15) error(String.format(Locale.ROOT, "Túl messze van gyalog (légvonalban %.0f km). Erre a buszos mód való.", crow))
         val j = JSONObject(
             Http.get(
                 "$baseUrl/api/v5/plan?fromPlace=${Http.enc("${from.lat},${from.lng}")}" +
-                    "&toPlace=${Http.enc("${dest.second.lat},${dest.second.lng}")}" +
+                    "&toPlace=${Http.enc("${dest.pos.lat},${dest.pos.lng}")}" +
                     "&directModes=WALK&transitModes=WALK&maxDirectTime=10800&language=$lang"
             )
         )
         val direct = j.optJSONArray("direct")
-        if (direct == null || direct.length() == 0) error("Nincs gyalogos útvonal (legfeljebb 3 óra séta).")
+        if (direct == null || direct.length() == 0) error("Nincs gyalogos útvonal ${dest.name} felé (legfeljebb kb. 3 óra séta tervezhető).")
         val it0 = direct.getJSONObject(0)
         val legs = it0.getJSONArray("legs")
         val path = mutableListOf<LatLng>()
@@ -80,29 +116,9 @@ class TransitousClient(private val baseUrl: String = BuildConfig.ROUTING_URL) {
         val km = Geo.cumulative(path).last() / 1000
         val min = it0.optLong("duration") / 60
         RoutePlan(
-            path, listOf(path), listOf(TransitStep("Gyalog", "Indulás", dest.first, 0)),
+            path, listOf(path), listOf(TransitStep("Gyalog", "Indulás", dest.name, 0)),
             String.format(Locale.ROOT, "%.1f km, kb. %d perc gyalog", km, min),
         )
-    }
-
-    /** Hely keresése egy pont környékén (pl. „Pantheon”, cím, megálló). */
-    suspend fun geocodeNear(text: String, near: LatLng, lang: String): Pair<String, LatLng>? = withContext(Dispatchers.IO) {
-        val arr = JSONArray(
-            Http.get(
-                "$baseUrl/api/v1/geocode?text=${Http.enc(text)}&language=$lang" +
-                    "&place=${Http.enc("${near.lat},${near.lng}")}&placeBias=5"
-            )
-        )
-        (0 until arr.length()).map { arr.getJSONObject(it) }
-            .map { it.optString("name") to LatLng(it.getDouble("lat"), it.getDouble("lon")) }
-            .firstOrNull { Geo.dist(it.second, near) < 30_000 }
-    }
-
-    private fun geocodeCity(city: String, lang: String): LatLng {
-        val arr = JSONArray(Http.get("$baseUrl/api/v1/geocode?text=${Http.enc(city)}&language=$lang"))
-        if (arr.length() == 0) error("Nem található város: $city")
-        val m = arr.getJSONObject(0)
-        return LatLng(m.getDouble("lat"), m.getDouble("lon"))
     }
 
     /** A területen közlekedő járatminták közül a keresett járatszámúak (adatfolyamként olvasva). */
@@ -186,6 +202,13 @@ class TransitousClient(private val baseUrl: String = BuildConfig.ROUTING_URL) {
             if (u.isEmpty()) return null
             return lineRe.find(u)?.value ?: u
         }
+
+        /** Ékezet, kis-nagybetű és írásjelek nélkül: „Kecskemet” == „Kecskemét”. */
+        fun norm(s: String): String =
+            Normalizer.normalize(s, Normalizer.Form.NFD)
+                .replace(Regex("\\p{M}+"), "")
+                .lowercase(Locale.ROOT)
+                .replace(Regex("[^a-z0-9]"), "")
 
         fun lineMatches(key: String, short: String, display: String): Boolean {
             val a = short.uppercase(Locale.ROOT)
