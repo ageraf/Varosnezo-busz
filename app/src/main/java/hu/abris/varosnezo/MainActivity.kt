@@ -17,6 +17,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import hu.abris.varosnezo.data.PoiTranslator
@@ -39,13 +40,18 @@ class MainActivity : ComponentActivity() {
 private fun App() {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    val client = remember { TransitousClient() }
 
     var city by rememberSaveable { mutableStateOf("") }
     var line by rememberSaveable { mutableStateOf("") }
-    var board by rememberSaveable { mutableStateOf("") }
-    var alight by rememberSaveable { mutableStateOf("") }
     var voice by rememberSaveable { mutableStateOf(TourState.lang) } // felolvasás nyelve
     var source by rememberSaveable { mutableStateOf("en") }         // Wikipedia nyelve
+
+    var dirs by remember { mutableStateOf<List<TransitousClient.Direction>>(emptyList()) }
+    var dirIdx by remember { mutableIntStateOf(0) }
+    var boardIdx by remember { mutableIntStateOf(0) }
+    var alightIdx by remember { mutableIntStateOf(0) }
+
     var loading by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var pendingSim by remember { mutableStateOf(false) }
@@ -57,6 +63,16 @@ private fun App() {
     val played by TourState.played.collectAsStateWithLifecycle()
     val progress by TourState.progressM.collectAsStateWithLifecycle()
     val message by TourState.message.collectAsStateWithLifecycle()
+
+    val dir = dirs.getOrNull(dirIdx)
+
+    fun selectDirection(i: Int) {
+        dirIdx = i
+        boardIdx = 0
+        alightIdx = (dirs.getOrNull(i)?.stops?.size ?: 1) - 1
+        TourState.plan.value = null
+        TourState.pois.value = emptyList()
+    }
 
     val permLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -78,13 +94,28 @@ private fun App() {
         permLauncher.launch(perms.toTypedArray())
     }
 
-    fun planRoute() = scope.launch {
+    fun loadDirections() = scope.launch {
+        loading = true
+        try {
+            status = "Járat keresése…"
+            dirs = emptyList()
+            dirs = client.directions(city, line, voice)
+            selectDirection(0)
+            status = null
+        } catch (e: Exception) {
+            status = "Hiba: ${e.message}"
+        } finally {
+            loading = false
+        }
+    }
+
+    fun loadSights() = scope.launch {
+        val d = dir ?: return@launch
         loading = true
         try {
             TourState.lang = voice
             TourState.pois.value = emptyList()
-            status = "Járat keresése…"
-            val p = TransitousClient().lineRoute(city, line, board, alight, voice)
+            val p = client.plan(d, boardIdx, alightIdx)
             TourState.plan.value = p
             status = "Látnivalók keresése…"
             var list = WikiPoiClient(source).poisAlong(p)
@@ -106,42 +137,78 @@ private fun App() {
             Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Városnéző Busz", style = MaterialTheme.typography.headlineSmall)
-                OutlinedTextField(city, { city = it }, Modifier.fillMaxWidth(), label = { Text("Város") }, placeholder = { Text("Róma") }, singleLine = true)
-                OutlinedTextField(line, { line = it }, Modifier.fillMaxWidth(), label = { Text("Járat") }, placeholder = { Text("40, 2-es villamos") }, singleLine = true)
-                OutlinedTextField(board, { board = it }, Modifier.fillMaxWidth(), label = { Text("Felszállás (megálló)") }, singleLine = true)
-                OutlinedTextField(alight, { alight = it }, Modifier.fillMaxWidth(), label = { Text("Leszállás (megálló)") }, singleLine = true)
-                LangRow("Látnivalók", source) { source = it }
-                LangRow("Felolvasás", voice) { voice = it }
-                Button(
-                    onClick = { planRoute() },
-                    enabled = !loading && !running && listOf(city, line, board, alight).all { it.isNotBlank() },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Járat és látnivalók") }
-                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-                (status ?: message)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-            } }
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Városnéző Busz", style = MaterialTheme.typography.headlineSmall)
+                    OutlinedTextField(
+                        city, { city = it; dirs = emptyList() }, Modifier.fillMaxWidth(),
+                        label = { Text("Város") }, placeholder = { Text("Róma") }, singleLine = true,
+                    )
+                    OutlinedTextField(
+                        line, { line = it; dirs = emptyList() }, Modifier.fillMaxWidth(),
+                        label = { Text("Járat") }, placeholder = { Text("105, 2-es villamos") }, singleLine = true,
+                    )
+                    Button(
+                        onClick = { loadDirections() },
+                        enabled = !loading && !running && city.isNotBlank() && line.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) { Text("Járat betöltése") }
+
+                    dir?.let { d ->
+                        Picker("Irány", dirs.map { it.label }, dirIdx, enabled = !running) { selectDirection(it) }
+                        Picker(
+                            "Felszállás",
+                            d.stops.dropLast(1).mapIndexed { i, s -> "${i + 1}. ${s.name}" },
+                            boardIdx, enabled = !running,
+                        ) {
+                            boardIdx = it
+                            if (alightIdx <= it) alightIdx = d.stops.size - 1
+                            TourState.plan.value = null
+                            TourState.pois.value = emptyList()
+                        }
+                        Picker(
+                            "Leszállás",
+                            d.stops.drop(boardIdx + 1).mapIndexed { i, s -> "${boardIdx + i + 2}. ${s.name}" },
+                            alightIdx - boardIdx - 1, enabled = !running,
+                        ) {
+                            alightIdx = boardIdx + 1 + it
+                            TourState.plan.value = null
+                            TourState.pois.value = emptyList()
+                        }
+                        LangRow("Látnivalók", source) { source = it }
+                        LangRow("Felolvasás", voice) { voice = it }
+                        Button(
+                            onClick = { loadSights() },
+                            enabled = !loading && !running,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) { Text("Látnivalók keresése") }
+                    }
+                    if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    (status ?: message)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            }
 
             plan?.let { p ->
-                item { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(p.summary, style = MaterialTheme.typography.titleMedium)
-                    p.steps.forEach { s -> Text("${s.line}: ${s.from} → ${s.to} (${s.stops} megálló)") }
-                    Text("${pois.size} látnivaló az útvonalon")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (!running) {
-                            Button(onClick = { startTour(false) }, enabled = pois.isNotEmpty()) { Text("Indítás") }
-                            OutlinedButton(onClick = { startTour(true) }, enabled = pois.isNotEmpty()) { Text("Szimuláció") }
-                        } else {
-                            Button(onClick = { TourService.stop(ctx) }) { Text("Leállítás") }
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(p.summary, style = MaterialTheme.typography.titleMedium)
+                        p.steps.forEach { s -> Text("${s.line}: ${s.from} → ${s.to}") }
+                        Text("${pois.size} látnivaló az útvonalon")
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            if (!running) {
+                                Button(onClick = { startTour(false) }, enabled = pois.isNotEmpty()) { Text("Indítás") }
+                                OutlinedButton(onClick = { startTour(true) }, enabled = pois.isNotEmpty()) { Text("Szimuláció") }
+                            } else {
+                                Button(onClick = { TourService.stop(ctx) }) { Text("Leállítás") }
+                            }
                         }
+                        if (running) {
+                            Text(String.format(Locale.ROOT, "Megtett út: %.1f km", progress / 1000))
+                            nowPlaying?.let { Text("🔊 $it", style = MaterialTheme.typography.titleSmall) }
+                        }
+                        HorizontalDivider()
                     }
-                    if (running) {
-                        Text(String.format(Locale.ROOT, "Megtett út: %.1f km", progress / 1000))
-                        nowPlaying?.let { Text("🔊 $it", style = MaterialTheme.typography.titleSmall) }
-                    }
-                    HorizontalDivider()
-                } }
+                }
             }
 
             items(pois, key = { it.id }) { poi ->
@@ -157,6 +224,33 @@ private fun App() {
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+/** Legördülő választó (gomb + menü). */
+@Composable
+private fun Picker(label: String, options: List<String>, selected: Int, enabled: Boolean = true, onSelect: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Column {
+        Text(label, style = MaterialTheme.typography.labelMedium)
+        Box {
+            OutlinedButton(
+                onClick = { open = true },
+                enabled = enabled && options.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    options.getOrNull(selected) ?: "–",
+                    Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                Text(" ▾")
+            }
+            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                options.forEachIndexed { i, o ->
+                    DropdownMenuItem(text = { Text(o) }, onClick = { onSelect(i); open = false })
+                }
+            }
         }
     }
 }

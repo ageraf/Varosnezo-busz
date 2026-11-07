@@ -1,35 +1,30 @@
 package hu.abris.varosnezo.data
 
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 
 object Http {
-    /** A Transitous és a Wikipedia is kér elérhetőséget a User-Agentben – írd át a sajátodra. */
+    /** A Transitous és a Wikipedia is kér elérhetőséget a User-Agentben. */
     const val CONTACT = "https://github.com/ageraf/Varosnezo-busz"
+    private const val UA = "VarosnezoBusz/0.1 (prototype; $CONTACT)"
 
-    fun get(url: String): String = request(url, "GET", null, emptyMap())
+    fun get(url: String): String = stream(url) { it.bufferedReader().readText() }
 
-    fun postJson(url: String, body: String, headers: Map<String, String>): String =
-        request(url, "POST", body, headers + ("Content-Type" to "application/json"))
-
-    private fun request(url: String, method: String, body: String?, headers: Map<String, String>): String {
+    /** Nagy válaszokhoz: a hívó adatfolyamként olvassa, nem kell egyben a memóriában tartani. */
+    fun <T> stream(url: String, block: (InputStream) -> T): T {
         val c = URL(url).openConnection() as HttpURLConnection
-        c.requestMethod = method
         c.connectTimeout = 15_000
-        c.readTimeout = 15_000
-        c.setRequestProperty("User-Agent", "VarosnezoBusz/0.1 (prototype; $CONTACT)")
-        headers.forEach { (k, v) -> c.setRequestProperty(k, v) }
+        c.readTimeout = 60_000
+        c.setRequestProperty("User-Agent", UA)
         try {
-            if (body != null) {
-                c.doOutput = true
-                c.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            }
             val code = c.responseCode
-            val stream = if (code in 200..299) c.inputStream else c.errorStream
-            val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-            if (code !in 200..299) error("HTTP $code: ${text.take(300)}")
-            return text
+            if (code !in 200..299) {
+                val err = c.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                error("HTTP $code: ${err.take(300)}")
+            }
+            return c.inputStream.buffered().use(block)
         } finally {
             c.disconnect()
         }

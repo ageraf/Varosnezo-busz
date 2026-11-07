@@ -1,8 +1,8 @@
 # Városnéző Busz – MVP (1. funkció), ingyenes változat
 
-Város + járat + felszállási és leszállási megálló alapján megkeresi a járat tényleges
-útvonalát, mellette Wikipedia-látnivalókat keres, és utazás közben sorban felolvassa őket.
-Ha a leszállási megálló nem található, kiírja a járat következő megállóit.
+Város + járat → betölti a járat irányait, a megállók legördülő listából választhatók.
+A két megálló közötti útvonal mentén Wikipedia-látnivalókat keres, és utazás közben
+sorban felolvassa őket.
 Nincs API-kulcs, nincs fizetős szolgáltatás.
 
 | Rész | Forrás |
