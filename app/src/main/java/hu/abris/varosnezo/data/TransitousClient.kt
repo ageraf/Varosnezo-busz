@@ -57,6 +57,47 @@ class TransitousClient(private val baseUrl: String = BuildConfig.ROUTING_URL) {
         return RoutePlan(path, listOf(path), listOf(step), String.format(Locale.ROOT, "%.1f km, %d megálló", km, ai - bi))
     }
 
+    /** Gyalogos útvonal: from -> szövegesen megadott cél (a cél keresése from körül). */
+    suspend fun walkRoute(from: LatLng, to: String, lang: String): RoutePlan = withContext(Dispatchers.IO) {
+        val dest = geocodeNear(to, from, lang) ?: error("Nem található: $to")
+        val j = JSONObject(
+            Http.get(
+                "$baseUrl/api/v5/plan?fromPlace=${Http.enc("${from.lat},${from.lng}")}" +
+                    "&toPlace=${Http.enc("${dest.second.lat},${dest.second.lng}")}" +
+                    "&directModes=WALK&transitModes=WALK&maxDirectTime=10800&language=$lang"
+            )
+        )
+        val direct = j.optJSONArray("direct")
+        if (direct == null || direct.length() == 0) error("Nincs gyalogos útvonal (legfeljebb 3 óra séta).")
+        val it0 = direct.getJSONObject(0)
+        val legs = it0.getJSONArray("legs")
+        val path = mutableListOf<LatLng>()
+        for (i in 0 until legs.length()) {
+            val g = legs.getJSONObject(i).optJSONObject("legGeometry") ?: continue
+            path += Geo.decodePolyline(g.getString("points"), g.optInt("precision", 6))
+        }
+        if (path.size < 2) error("Üres gyalogos útvonal.")
+        val km = Geo.cumulative(path).last() / 1000
+        val min = it0.optLong("duration") / 60
+        RoutePlan(
+            path, listOf(path), listOf(TransitStep("Gyalog", "Indulás", dest.first, 0)),
+            String.format(Locale.ROOT, "%.1f km, kb. %d perc gyalog", km, min),
+        )
+    }
+
+    /** Hely keresése egy pont környékén (pl. „Pantheon”, cím, megálló). */
+    suspend fun geocodeNear(text: String, near: LatLng, lang: String): Pair<String, LatLng>? = withContext(Dispatchers.IO) {
+        val arr = JSONArray(
+            Http.get(
+                "$baseUrl/api/v1/geocode?text=${Http.enc(text)}&language=$lang" +
+                    "&place=${Http.enc("${near.lat},${near.lng}")}&placeBias=5"
+            )
+        )
+        (0 until arr.length()).map { arr.getJSONObject(it) }
+            .map { it.optString("name") to LatLng(it.getDouble("lat"), it.getDouble("lon")) }
+            .firstOrNull { Geo.dist(it.second, near) < 30_000 }
+    }
+
     private fun geocodeCity(city: String, lang: String): LatLng {
         val arr = JSONArray(Http.get("$baseUrl/api/v1/geocode?text=${Http.enc(city)}&language=$lang"))
         if (arr.length() == 0) error("Nem található város: $city")

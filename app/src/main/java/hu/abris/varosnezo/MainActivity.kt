@@ -1,6 +1,8 @@
 package hu.abris.varosnezo
 
 import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -22,13 +24,17 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import hu.abris.varosnezo.data.TransitousClient
 import hu.abris.varosnezo.data.WikiPoiClient
 import hu.abris.varosnezo.tour.TourService
 import hu.abris.varosnezo.tour.TourState
 import hu.abris.varosnezo.ui.TourMap
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.Locale
+import kotlin.coroutines.resume
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -56,7 +62,9 @@ private fun App() {
 
     var loading by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    var pendingMode by remember { mutableStateOf(TourService.MODE_BUS) }
+    var walkTo by rememberSaveable { mutableStateOf("") }
+    var walkFrom by rememberSaveable { mutableStateOf("") }
+    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var expanded by remember { mutableStateOf(setOf<Long>()) }
 
     val mode by TourState.mode.collectAsStateWithLifecycle()
@@ -89,21 +97,57 @@ private fun App() {
     ) { res ->
         val ok = res[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
             res[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        if (ok) TourService.start(ctx, pendingMode)
-        else status = "Helymeghatározási engedély nélkül nem indítható."
+        if (ok) pendingAction?.invoke()
+        else status = "Helymeghatározási engedély nélkül nem működik."
+        pendingAction = null
     }
 
-    fun startTour(mode: String) {
-        pendingMode = mode
-        TourState.lang = lang
-        TourState.message.value = null
-        status = null
+    fun withLocationPermission(action: () -> Unit) {
+        pendingAction = action
         val perms = buildList {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             add(Manifest.permission.ACCESS_COARSE_LOCATION)
             if (Build.VERSION.SDK_INT >= 33) add(Manifest.permission.POST_NOTIFICATIONS)
         }
         permLauncher.launch(perms.toTypedArray())
+    }
+
+    fun startTour(mode: String) {
+        TourState.lang = lang
+        TourState.message.value = null
+        status = null
+        withLocationPermission { TourService.start(ctx, mode) }
+    }
+
+    fun planWalk() = withLocationPermission {
+        scope.launch {
+            loading = true
+            try {
+                TourState.lang = lang
+                TourState.mode.value = TourState.WALK_ROUTE
+                TourState.plan.value = null
+                TourState.pois.value = emptyList()
+                status = "Helyzet meghatározása…"
+                val here = currentLocation(ctx)
+                val start = if (walkFrom.isBlank()) {
+                    here ?: error("Nem sikerült meghatározni a helyzetedet.")
+                } else {
+                    val near = here ?: client.geocodeNear(walkTo, LatLng(47.4979, 19.0402), lang)?.second
+                        ?: error("Nem található: $walkTo")
+                    client.geocodeNear(walkFrom, near, lang)?.second ?: error("Nem található: $walkFrom")
+                }
+                status = "Gyalogos útvonal tervezése…"
+                val p = client.walkRoute(start, walkTo, lang)
+                TourState.plan.value = p
+                status = "Látnivalók keresése…"
+                TourState.pois.value = WikiPoiClient(lang).poisAlong(p, corridorM = 120.0, minGapM = 100.0)
+                status = null
+            } catch (e: Exception) {
+                status = "Hiba: ${e.message}"
+            } finally {
+                loading = false
+            }
+        }
     }
 
     fun loadDirections() = scope.launch {
@@ -232,29 +276,68 @@ private fun App() {
                 ) {
                     item {
                         Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            LangRow(lang) { lang = it; clearPlan() }
+
+                            Text("Úti céllal", style = MaterialTheme.typography.titleMedium)
+                            OutlinedTextField(
+                                walkTo, { walkTo = it }, Modifier.fillMaxWidth(),
+                                label = { Text("Hová") }, placeholder = { Text("Pantheon") }, singleLine = true,
+                            )
+                            OutlinedTextField(
+                                walkFrom, { walkFrom = it }, Modifier.fillMaxWidth(),
+                                label = { Text("Honnan") }, placeholder = { Text("üresen: ahol most vagy") }, singleLine = true,
+                            )
+                            Button(
+                                onClick = { planWalk() },
+                                enabled = !loading && !running && walkTo.isNotBlank(),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) { Text("Gyalogos útvonal és látnivalók") }
+                            if (mode == TourState.WALK_ROUTE) plan?.let { p ->
+                                Text(p.summary + " → " + p.steps.first().to, style = MaterialTheme.typography.titleSmall)
+                                Text("${pois.size} látnivaló az útvonalon")
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (!running) {
+                                        Button(onClick = { startTour(TourService.MODE_WALK_ROUTE) }, enabled = pois.isNotEmpty()) { Text("Indítás") }
+                                        OutlinedButton(onClick = { startTour(TourService.MODE_WALK_SIM) }, enabled = pois.isNotEmpty()) { Text("Szimuláció") }
+                                    }
+                                }
+                            }
+
+                            HorizontalDivider()
+                            Text("Szabad séta", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "Sétálj, amerre szeretnél: az app a környékbeli látnivalókat felolvassa, amikor kb. 50 m-re odaérsz.",
+                                "Útvonal nélkül: amerre mész, a közeli látnivalókat felolvassa, amikor kb. 50 m-re odaérsz.",
                                 style = MaterialTheme.typography.bodyMedium,
                             )
-                            LangRow(lang) { lang = it }
                             if (!running) {
-                                Button(onClick = { startTour(TourService.MODE_WALK) }, modifier = Modifier.fillMaxWidth()) {
-                                    Text("Séta indítása")
-                                }
-                            } else {
-                                Button(onClick = { TourService.stop(ctx) }, modifier = Modifier.fillMaxWidth()) {
-                                    Text(if (mode == TourState.WALK) "Séta leállítása" else "Busztúra leállítása")
+                                OutlinedButton(onClick = { startTour(TourService.MODE_WALK) }, modifier = Modifier.fillMaxWidth()) {
+                                    Text("Szabad séta indítása")
                                 }
                             }
-                            (status ?: message)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                            if (running && mode == TourState.WALK) {
-                                Text("${pois.size} látnivaló a környéken, ${played.size} felolvasva")
+
+                            if (running) {
+                                Button(onClick = { TourService.stop(ctx) }, modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        when (mode) {
+                                            TourState.BUS -> "Busztúra leállítása"
+                                            else -> "Séta leállítása"
+                                        }
+                                    )
+                                }
+                                when (mode) {
+                                    TourState.WALK -> Text("${pois.size} látnivaló a környéken, ${played.size} felolvasva")
+                                    TourState.WALK_ROUTE -> Text(String.format(Locale.ROOT, "Megtett út: %.1f km", progress / 1000))
+                                }
                                 NowPlaying(nowPlaying)
                             }
+                            if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            (status ?: message)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                             HorizontalDivider()
                         }
                     }
-                    if (mode == TourState.WALK) poiItems(pois, played, expanded, showKm = false, onToggle = toggle)
+                    if (mode == TourState.WALK || mode == TourState.WALK_ROUTE) {
+                        poiItems(pois, played, expanded, showKm = mode == TourState.WALK_ROUTE, onToggle = toggle)
+                    }
                     item { Spacer(Modifier.height(24.dp)) }
                 }
 
@@ -279,6 +362,14 @@ private fun App() {
             }
         }
     }
+}
+
+@SuppressLint("MissingPermission") // csak engedélykérés után hívjuk
+private suspend fun currentLocation(ctx: Context): LatLng? = suspendCancellableCoroutine { cont ->
+    LocationServices.getFusedLocationProviderClient(ctx)
+        .getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, null)
+        .addOnSuccessListener { l -> cont.resume(l?.let { LatLng(it.latitude, it.longitude) }) }
+        .addOnFailureListener { cont.resume(null) }
 }
 
 /** Látnivalók listája; koppintásra kinyílik a teljes leírás. */

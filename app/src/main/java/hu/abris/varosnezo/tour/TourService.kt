@@ -50,14 +50,14 @@ class TourService : Service(), TextToSpeech.OnInitListener {
         const val MODE_BUS = "bus"
         const val MODE_SIM = "sim"
         const val MODE_WALK = "walk"
+        const val MODE_WALK_ROUTE = "walkroute"
+        const val MODE_WALK_SIM = "walksim"
         private const val CHANNEL = "tour"
         private const val NOTIF_ID = 1
 
-        private const val MIN_LEAD_M = 120.0   // busz: legalább ennyivel előtte kezdjen beszélni
-        private const val LEAD_S = 12.0        // ...vagy ennyi másodpercnyi út előtte
-        private const val PASSED_M = 80.0      // busz: ennyivel elhaladva még felolvasható
-        private const val OFF_ROUTE_M = 300.0  // busz: ennél messzebb nem vagyunk az útvonalon
-        private const val SIM_SPEED = 8.0      // m/s, szimuláció (~29 km/h)
+        // Útvonalkövetés paraméterei: [minimális előre szólás m, előre szólás mp, elhaladva még m, útvonaltól max m, szimulációs m/s]
+        private val BUS_PARAMS = doubleArrayOf(120.0, 12.0, 80.0, 300.0, 8.0)
+        private val WALK_PARAMS = doubleArrayOf(25.0, 15.0, 40.0, 150.0, 2.5)
         private const val WALK_TRIGGER_M = 50.0 // séta: ennyire megközelítve szólal meg
         private const val WALK_REFETCH_M = 150.0 // séta: ennyi elmozdulás után új keresés
 
@@ -78,6 +78,7 @@ class TourService : Service(), TextToSpeech.OnInitListener {
     @Volatile private var ttsReady = false
     @Volatile private var speaking = false
     private var walk = false
+    private var params = BUS_PARAMS
     private var cum = DoubleArray(0)
     private var lastSeg = 0
     private var simJob: Job? = null
@@ -108,7 +109,13 @@ class TourService : Service(), TextToSpeech.OnInitListener {
         simJob?.cancel()
         val mode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_BUS
         walk = mode == MODE_WALK
-        TourState.mode.value = if (walk) TourState.WALK else TourState.BUS
+        val walkRoute = mode == MODE_WALK_ROUTE || mode == MODE_WALK_SIM
+        params = if (walkRoute) WALK_PARAMS else BUS_PARAMS
+        TourState.mode.value = when {
+            walk -> TourState.WALK
+            walkRoute -> TourState.WALK_ROUTE
+            else -> TourState.BUS
+        }
         TourState.played.value = emptySet()
         TourState.progressM.value = 0.0
         TourState.me.value = null
@@ -128,13 +135,14 @@ class TourService : Service(), TextToSpeech.OnInitListener {
         }
         TourState.running.value = true
 
-        if (mode == MODE_SIM) {
+        if (mode == MODE_SIM || mode == MODE_WALK_SIM) {
             val plan = TourState.plan.value!!
+            val speed = params[4]
             simJob = scope.launch {
                 var d = 0.0
                 while (d <= cum.last()) {
-                    onLocation(Geo.pointAt(plan.path, cum, d), SIM_SPEED)
-                    d += SIM_SPEED
+                    onLocation(Geo.pointAt(plan.path, cum, d), speed)
+                    d += speed
                     delay(1000)
                 }
             }
@@ -165,15 +173,15 @@ class TourService : Service(), TextToSpeech.OnInitListener {
             val full = Geo.project(p, plan.path, cum)
             if (full.offM < pr.offM) pr = full
         }
-        if (pr.offM > OFF_ROUTE_M) return
+        if (pr.offM > params[3]) return
         lastSeg = pr.segIndex
         TourState.progressM.value = pr.alongM
 
         if (!ttsReady || speaking) return
-        val lead = max(MIN_LEAD_M, speed * LEAD_S)
+        val lead = max(params[0], speed * params[1])
         val played = TourState.played.value
         val next = TourState.pois.value
-            .filter { it.id !in played && it.routeMeters - pr.alongM in -PASSED_M..lead }
+            .filter { it.id !in played && it.routeMeters - pr.alongM in -params[2]..lead }
             .minByOrNull { it.routeMeters } ?: return
         speak(next)
     }

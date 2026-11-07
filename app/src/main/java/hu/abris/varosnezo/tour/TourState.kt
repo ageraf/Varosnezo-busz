@@ -8,7 +8,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 /** Közös állapot a UI és a háttérszolgáltatás között. */
 object TourState {
     const val BUS = "bus"
-    const val WALK = "walk"
+    const val WALK = "walk"          // szabad séta
+    const val WALK_ROUTE = "walkroute" // gyalogos útvonal célig
 
     @Volatile var lang: String = "hu"
     val mode = MutableStateFlow(BUS)
