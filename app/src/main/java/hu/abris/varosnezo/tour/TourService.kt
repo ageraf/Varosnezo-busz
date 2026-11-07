@@ -24,6 +24,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import hu.abris.varosnezo.LatLng
 import hu.abris.varosnezo.Poi
+import hu.abris.varosnezo.data.WikiPoiClient
 import hu.abris.varosnezo.geo.Geo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,26 +38,32 @@ import java.util.Locale
 import kotlin.math.max
 
 /**
- * Előtérben futó szolgáltatás: helyzetkövetés -> útvonalra vetítés -> a következő
- * látnivaló felolvasása, mielőtt a busz odaér. Szimulációs módban GPS nélkül halad végig.
+ * Előtérben futó szolgáltatás.
+ * Busz: helyzet -> útvonalra vetítés -> a következő látnivaló felolvasása, mielőtt odaér a jármű.
+ * Séta: a környék látnivalóit folyamatosan tölti, és felolvassa, amelyikhez közel érsz.
  */
 class TourService : Service(), TextToSpeech.OnInitListener {
 
     companion object {
         const val ACTION_STOP = "hu.abris.varosnezo.STOP"
-        const val EXTRA_SIM = "sim"
+        const val EXTRA_MODE = "mode"
+        const val MODE_BUS = "bus"
+        const val MODE_SIM = "sim"
+        const val MODE_WALK = "walk"
         private const val CHANNEL = "tour"
         private const val NOTIF_ID = 1
 
-        private const val MIN_LEAD_M = 120.0  // legalább ennyivel előtte kezdjen beszélni
-        private const val LEAD_S = 12.0       // ...vagy ennyi másodpercnyi út előtte
-        private const val PASSED_M = 80.0     // ennyivel elhaladva még felolvasható
-        private const val OFF_ROUTE_M = 300.0 // ennél messzebb nem vagyunk az útvonalon
-        private const val SIM_SPEED = 8.0     // m/s, szimuláció (~29 km/h)
+        private const val MIN_LEAD_M = 120.0   // busz: legalább ennyivel előtte kezdjen beszélni
+        private const val LEAD_S = 12.0        // ...vagy ennyi másodpercnyi út előtte
+        private const val PASSED_M = 80.0      // busz: ennyivel elhaladva még felolvasható
+        private const val OFF_ROUTE_M = 300.0  // busz: ennél messzebb nem vagyunk az útvonalon
+        private const val SIM_SPEED = 8.0      // m/s, szimuláció (~29 km/h)
+        private const val WALK_TRIGGER_M = 50.0 // séta: ennyire megközelítve szólal meg
+        private const val WALK_REFETCH_M = 150.0 // séta: ennyi elmozdulás után új keresés
 
-        fun start(ctx: Context, simulate: Boolean) {
+        fun start(ctx: Context, mode: String) {
             ContextCompat.startForegroundService(
-                ctx, Intent(ctx, TourService::class.java).putExtra(EXTRA_SIM, simulate)
+                ctx, Intent(ctx, TourService::class.java).putExtra(EXTRA_MODE, mode)
             )
         }
 
@@ -70,9 +77,12 @@ class TourService : Service(), TextToSpeech.OnInitListener {
     private lateinit var fused: FusedLocationProviderClient
     @Volatile private var ttsReady = false
     @Volatile private var speaking = false
+    private var walk = false
     private var cum = DoubleArray(0)
     private var lastSeg = 0
     private var simJob: Job? = null
+    private var walkFetchCenter: LatLng? = null
+    private var fetching = false
 
     private val callback = object : LocationCallback() {
         override fun onLocationResult(r: LocationResult) {
@@ -93,22 +103,33 @@ class TourService : Service(), TextToSpeech.OnInitListener {
             return START_NOT_STICKY
         }
         startForegroundCompat(notification("Városnézés fut"))
-        val plan = TourState.plan.value
-        if (plan == null) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
 
-        // Újraindításkor tiszta lap
         fused.removeLocationUpdates(callback)
         simJob?.cancel()
-        cum = Geo.cumulative(plan.path)
-        lastSeg = 0
+        val mode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_BUS
+        walk = mode == MODE_WALK
+        TourState.mode.value = if (walk) TourState.WALK else TourState.BUS
         TourState.played.value = emptySet()
         TourState.progressM.value = 0.0
+        TourState.me.value = null
+
+        if (walk) {
+            walkFetchCenter = null
+            TourState.plan.value = null
+            TourState.pois.value = emptyList()
+        } else {
+            val plan = TourState.plan.value
+            if (plan == null) {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            cum = Geo.cumulative(plan.path)
+            lastSeg = 0
+        }
         TourState.running.value = true
 
-        if (intent?.getBooleanExtra(EXTRA_SIM, false) == true) {
+        if (mode == MODE_SIM) {
+            val plan = TourState.plan.value!!
             simJob = scope.launch {
                 var d = 0.0
                 while (d <= cum.last()) {
@@ -118,7 +139,7 @@ class TourService : Service(), TextToSpeech.OnInitListener {
                 }
             }
         } else {
-            val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 2000L)
+            val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, if (walk) 3000L else 2000L)
                 .setMinUpdateDistanceMeters(5f)
                 .build()
             try {
@@ -132,8 +153,12 @@ class TourService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun onLocation(p: LatLng, speed: Double) {
-        val plan = TourState.plan.value ?: return
+        TourState.me.value = p
+        if (walk) onWalk(p) else onBus(p, speed)
+    }
 
+    private fun onBus(p: LatLng, speed: Double) {
+        val plan = TourState.plan.value ?: return
         // Előrefelé keresünk (hurkoló útvonalnál ne ugorjon vissza); ha nem talál, teljes keresés.
         var pr = Geo.project(p, plan.path, cum, lastSeg - 5)
         if (pr.offM > 60) {
@@ -150,6 +175,32 @@ class TourService : Service(), TextToSpeech.OnInitListener {
         val next = TourState.pois.value
             .filter { it.id !in played && it.routeMeters - pr.alongM in -PASSED_M..lead }
             .minByOrNull { it.routeMeters } ?: return
+        speak(next)
+    }
+
+    private fun onWalk(p: LatLng) {
+        val center = walkFetchCenter
+        if (!fetching && (center == null || Geo.dist(center, p) > WALK_REFETCH_M)) {
+            fetching = true
+            walkFetchCenter = p
+            scope.launch {
+                try {
+                    val found = WikiPoiClient(TourState.lang).poisNear(p, 400)
+                    TourState.pois.update { old -> (old + found).distinctBy { it.id } }
+                } catch (e: Exception) {
+                    walkFetchCenter = center // következő helyzetnél újrapróbálja
+                } finally {
+                    fetching = false
+                }
+            }
+        }
+        if (!ttsReady || speaking) return
+        val played = TourState.played.value
+        val next = TourState.pois.value
+            .filter { it.id !in played }
+            .map { it to Geo.dist(it.pos, p) }
+            .filter { it.second <= WALK_TRIGGER_M }
+            .minByOrNull { it.second }?.first ?: return
         speak(next)
     }
 

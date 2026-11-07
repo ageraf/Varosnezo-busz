@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
 
 permissions:
@@ -28,9 +28,21 @@ jobs:
         run: echo "$KEYSTORE_B64" | base64 -d > release.keystore
       - name: Build
         run: |
-          gradle assembleDebug --no-daemon
+          set -o pipefail
+          gradle assembleDebug --no-daemon 2>&1 | tee build.log
           cp app/build/outputs/apk/debug/app-debug.apk varosnezo-${{ github.run_number }}.apk
+      - name: Hibanapló mentése (ci-log ág)
+        if: failure()
+        run: |
+          { grep -E "^e: |error:|What went wrong" -A4 build.log | head -150; echo ----; tail -60 build.log; } > ci-error.txt
+          git config user.name ci; git config user.email ci@users.noreply.github.com
+          git checkout --orphan ci-log
+          git rm -rfq --cached .
+          git add ci-error.txt
+          git commit -qm "CI hiba ${{ github.sha }}"
+          git push -f origin ci-log
       - name: Release (letölthető APK)
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
