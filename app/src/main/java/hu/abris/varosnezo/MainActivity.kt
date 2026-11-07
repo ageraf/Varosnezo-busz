@@ -131,6 +131,29 @@ private fun App() {
         withLocationPermission { TourService.start(ctx, mode) }
     }
 
+    fun searchPlace(st: PlaceState) = scope.launch {
+        if (st.text.isBlank()) return@launch
+        loading = true
+        try {
+            status = null
+            st.hits = client.searchPlaces(st.text, me, lang)
+            if (st.hits.isEmpty()) status = "Nincs találat: ${st.text}"
+            if (st.hits.size == 1) st.picked = st.hits.first() else st.open = st.hits.isNotEmpty()
+        } catch (e: Exception) {
+            status = "Hiba: ${e.message}"
+        } finally {
+            loading = false
+        }
+    }
+
+    /** A kiválasztott találat, vagy ha nincs, a legjobb találat (és ki is írjuk, mit választottunk). */
+    suspend fun resolve(st: PlaceState, near: LatLng?): TransitousClient.PlaceHit {
+        st.picked?.let { return it }
+        val hit = client.searchPlaces(st.text, near, lang).firstOrNull() ?: error("Nem található: ${st.text}")
+        st.picked = hit
+        return hit
+    }
+
     fun planWalk() = withLocationPermission {
         scope.launch {
             loading = true
@@ -159,29 +182,6 @@ private fun App() {
                 loading = false
             }
         }
-    }
-
-    fun searchPlace(st: PlaceState) = scope.launch {
-        if (st.text.isBlank()) return@launch
-        loading = true
-        try {
-            status = null
-            st.hits = client.searchPlaces(st.text, me, lang)
-            if (st.hits.isEmpty()) status = "Nincs találat: ${st.text}"
-            if (st.hits.size == 1) st.picked = st.hits.first() else st.open = st.hits.isNotEmpty()
-        } catch (e: Exception) {
-            status = "Hiba: ${e.message}"
-        } finally {
-            loading = false
-        }
-    }
-
-    /** A kiválasztott találat, vagy ha nincs, a legjobb találat (és ki is írjuk, mit választottunk). */
-    suspend fun resolve(st: PlaceState, near: LatLng?): TransitousClient.PlaceHit {
-        st.picked?.let { return it }
-        val hit = client.searchPlaces(st.text, near, lang).firstOrNull() ?: error("Nem található: ${st.text}")
-        st.picked = hit
-        return hit
     }
 
     fun loadDirections() = scope.launch {
