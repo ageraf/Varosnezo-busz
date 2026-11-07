@@ -1,14 +1,17 @@
 # Városnéző Busz – MVP (1. funkció), ingyenes változat
 
-Város + járat → betölti a járat irányait, a megállók legördülő listából választhatók.
-A két megálló közötti útvonal mentén Wikipedia-látnivalókat keres, és utazás közben
-sorban felolvassa őket.
+- **Busz:** város + járat → irány és megállók legördülő listából; az útvonal mentén
+  Wikipedia-látnivalókat olvas fel, mielőtt odaér a jármű.
+- **Séta:** útvonal nélkül; a környék látnivalóit olvassa fel, amikor kb. 50 m-re odaérsz.
+- **Térkép:** OpenStreetMap, útvonal, látnivalók, saját pozíció.
+- Szövegek: mindig a választott nyelvű eredeti Wikipedia-cikk (nincs gépi fordítás).
 Nincs API-kulcs, nincs fizetős szolgáltatás.
 
 | Rész | Forrás |
 |---|---|
 | Megálló, indulások, járat útvonala | MOTIS API – alapból a Transitous közösségi szervere |
 | Látnivalók | Wikipedia API |
+| Térkép | OpenStreetMap (osmdroid) |
 | Felolvasás | a telefon beépített TTS-e |
 
 ## Beállítás
