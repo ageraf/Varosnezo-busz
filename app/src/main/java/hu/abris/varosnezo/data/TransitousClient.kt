@@ -39,22 +39,32 @@ class TransitousClient(private val baseUrl: String = BuildConfig.ROUTING_URL) {
             }
             if (deps.isEmpty()) error("A(z) $lineKey járat nem indul innen: ${cands.first().name}")
 
-            // Irányonként megnézzük, melyik járat megy a leszállási megállóhoz
+            // Minden irányt és megállóoszlopot kipróbálunk (körjáratnál ugyanaz a megálló többször is
+            // szerepelhet); a legrövidebb utat választjuk, ami eléri a leszállási megállót.
+            val boardKey = norm(board)
             val alightKey = norm(alight)
             val nextStops = LinkedHashSet<String>()
-            for (d in deps.distinctBy { it.headsign }.take(4)) {
-                val leg = tripLeg(d.tripId)
+            val legCache = HashMap<String, JSONObject>()
+            var best: Triple<JSONObject, List<Stop>, Pair<Int, Int>>? = null
+            val tries = deps.distinctBy { it.headsign to it.stopId }
+                .sortedByDescending { nameMatches(boardKey, it.stopName) }
+                .take(8)
+            for (d in tries) {
+                val leg = legCache.getOrPut(d.tripId) { tripLeg(d.tripId) }
                 val stops = legStops(leg)
-                var bi = stops.indexOfFirst { it.id == d.stopId }
-                if (bi < 0) bi = stops.indexOfFirst { norm(it.name) == norm(d.stopName) }
-                if (bi < 0) continue
-                val ai = (bi + 1 until stops.size).firstOrNull { nameMatches(alightKey, stops[it].name) }
-                if (ai == null) {
-                    stops.drop(bi + 1).forEach { nextStops += it.name }
-                    continue
+                val bis = stops.indices.filter { stops[it].id == d.stopId }
+                    .ifEmpty { stops.indices.filter { norm(stops[it].name) == norm(d.stopName) } }
+                for (bi in bis) {
+                    val ai = (bi + 1 until stops.size).firstOrNull { nameMatches(alightKey, stops[it].name) }
+                    if (ai == null) {
+                        stops.drop(bi + 1).forEach { nextStops += it.name }
+                        continue
+                    }
+                    val cur = best
+                    if (cur == null || ai - bi < cur.third.second - cur.third.first) best = Triple(leg, stops, bi to ai)
                 }
-                return@withContext buildPlan(leg, stops, bi, ai)
             }
+            best?.let { return@withContext buildPlan(it.first, it.second, it.third.first, it.third.second) }
             error("Nem találom a(z) „$alight” megállót a(z) $lineKey útvonalán. Megállók: " +
                 nextStops.take(30).joinToString(", "))
         }
