@@ -48,3 +48,14 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Build ${{ github.run_number }}
           files: varosnezo-${{ github.run_number }}.apk
+      - name: Régi kiadások törlése (a legutóbbi 3 marad)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --limit 100 --json tagName,createdAt \
+            -q 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName' \
+            | xargs -r -n1 gh release delete --cleanup-tag -y
+      - name: Hibanapló ág törlése sikeres buildnél
+        if: success()
+        run: git push origin --delete ci-log || true
