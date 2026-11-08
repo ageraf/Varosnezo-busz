@@ -66,6 +66,10 @@ private fun App() {
     val city = remember { PlaceState() }
     var line by rememberSaveable { mutableStateOf("") }
     var lang by rememberSaveable { mutableStateOf(TourState.lang) }
+    val prefs = remember { ctx.getSharedPreferences("settings", Context.MODE_PRIVATE) }
+    var walkRadius by remember {
+        mutableIntStateOf(prefs.getInt("walkRadius", 50).also { TourState.walkRadiusM = it })
+    }
 
     var dirs by remember { mutableStateOf<List<TransitousClient.Direction>>(emptyList()) }
     var dirIdx by remember { mutableIntStateOf(0) }
@@ -331,8 +335,19 @@ private fun App() {
                             HorizontalDivider()
                             Text("Szabad séta", style = MaterialTheme.typography.titleMedium)
                             Text(
-                                "Útvonal nélkül: amerre mész, a közeli látnivalókat felolvassa, amikor kb. 50 m-re odaérsz.",
+                                "Útvonal nélkül: amerre mész, a közeli látnivalókat felolvassa, amikor $walkRadius m-re odaérsz.",
                                 style = MaterialTheme.typography.bodyMedium,
+                            )
+                            Text("Megszólalási távolság: $walkRadius m", style = MaterialTheme.typography.labelLarge)
+                            Slider(
+                                value = walkRadius.toFloat(),
+                                onValueChange = {
+                                    walkRadius = (Math.round(it / 10f) * 10).coerceIn(20, 300)
+                                    TourState.walkRadiusM = walkRadius
+                                },
+                                onValueChangeFinished = { prefs.edit().putInt("walkRadius", walkRadius).apply() },
+                                valueRange = 20f..300f,
+                                steps = 27,
                             )
                             if (!running) {
                                 OutlinedButton(onClick = { startTour(TourService.MODE_WALK) }, modifier = Modifier.fillMaxWidth()) {

@@ -58,7 +58,6 @@ class TourService : Service(), TextToSpeech.OnInitListener {
         // Útvonalkövetés paraméterei: [minimális előre szólás m, előre szólás mp, elhaladva még m, útvonaltól max m, szimulációs m/s]
         private val BUS_PARAMS = doubleArrayOf(120.0, 12.0, 80.0, 300.0, 8.0)
         private val WALK_PARAMS = doubleArrayOf(25.0, 15.0, 40.0, 150.0, 2.5)
-        private const val WALK_TRIGGER_M = 50.0 // séta: ennyire megközelítve szólal meg
         private const val WALK_REFETCH_M = 150.0 // séta: ennyi elmozdulás után új keresés
 
         fun start(ctx: Context, mode: String) {
@@ -193,7 +192,7 @@ class TourService : Service(), TextToSpeech.OnInitListener {
             walkFetchCenter = p
             scope.launch {
                 try {
-                    val found = WikiPoiClient(TourState.lang).poisNear(p, 400)
+                    val found = WikiPoiClient(TourState.lang).poisNear(p, max(400, TourState.walkRadiusM + 250))
                     TourState.pois.update { old -> (old + found).distinctBy { it.id } }
                 } catch (e: Exception) {
                     walkFetchCenter = center // következő helyzetnél újrapróbálja
@@ -207,7 +206,7 @@ class TourService : Service(), TextToSpeech.OnInitListener {
         val next = TourState.pois.value
             .filter { it.id !in played }
             .map { it to Geo.dist(it.pos, p) }
-            .filter { it.second <= WALK_TRIGGER_M }
+            .filter { it.second <= TourState.walkRadiusM }
             .minByOrNull { it.second }?.first ?: return
         speak(next)
     }

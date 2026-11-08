@@ -12,6 +12,8 @@ object TourState {
     const val WALK_ROUTE = "walkroute" // gyalogos útvonal célig
 
     @Volatile var lang: String = "hu"
+    /** Szabad séta: ennyire megközelítve szólal meg (m), csúszkával állítható. */
+    @Volatile var walkRadiusM: Int = 50
     val mode = MutableStateFlow(BUS)
     val plan = MutableStateFlow<RoutePlan?>(null)
     val pois = MutableStateFlow<List<Poi>>(emptyList())
